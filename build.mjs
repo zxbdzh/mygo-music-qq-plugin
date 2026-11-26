@@ -7,7 +7,7 @@ const manifest = JSON.parse(await readFile('plugin.json', 'utf8'));
 manifest.main = 'index.js';
 await writeFile('dist/plugin.json', JSON.stringify(manifest, null, 2) + '\n');
 for (const [source, target] of [
-  ['locales/zh-CN.json', 'locales/zh-CN.json'], ['LICENSE', 'LICENSE'],
+  ['icon.png', 'icon.png'], ['locales/zh-CN.json', 'locales/zh-CN.json'], ['LICENSE', 'LICENSE'],
   ['qrc-des.LICENSE', 'qrc-des.LICENSE'], ['qrc-pako.LICENSE', 'qrc-pako.LICENSE'],
   ['node_modules/jsqr/LICENSE', 'jsqr.LICENSE'], ['node_modules/jpeg-js/LICENSE', 'jpeg-js.LICENSE'],
   ['node_modules/pako/LICENSE', 'pako.LICENSE'],

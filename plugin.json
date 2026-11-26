@@ -1,9 +1,10 @@
 {
   "id": "qqmusic",
   "name": "QQ Music",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "minAppVersion": "0.1.8",
   "main": "dist/index.js",
+  "icon": "icon.png",
   "playback": "stream",
   "permissions": { "network": ["*"] },
   "settings": [
