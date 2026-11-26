@@ -1,7 +1,7 @@
 {
   "id": "qqmusic",
   "name": "QQ Music",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "minAppVersion": "0.1.8",
   "main": "index.js",
   "icon": "icon.png",
@@ -38,6 +38,12 @@
       "key": "externalSourceScript",
       "label": "LX script URL",
       "help": "Full LX script URL starting with https://, e.g. https://source.shiqianjiang.cn/api/script/lx?key=… . The plugin reads the declared endpoint only and never executes the script."
+    },
+    {
+      "key": "externalSourceBackupScript",
+      "label": "Backup LX script URL",
+      "type": "text",
+      "help": "Backup LX script URL. Automatically tried when the primary script fails."
     }
   ],
   "navigation": [

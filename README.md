@@ -23,9 +23,14 @@ Off by default. When enabled, playback first asks an LX source for a direct audi
    https://source.shiqianjiang.cn/api/script/lx?key=your-key
    ```
 
-3. Play. Changing the URL (including rotating the key) makes the next playback read the script again.
+3. Optionally put a second full script URL in **Backup LX script URL**. Playback tries the primary source first, then the backup, and finally official playback. Each failed source logs a sanitized fallback reason without keys or URLs.
+4. Play. Changing either URL (including rotating its key) makes the next playback read that script again. The two URLs have independent caches.
 
 The plugin only reads the endpoint, key and whether the script declares QQ (`tx`). It **never executes the script**. If the script has no `tx` source, the URL is wrong, or the service is unavailable, playback is still completed by the official path.
+
+Scripts containing both `method: "POST"` (single quotes also work) and `musicId` use a JSON POST request with `source`, `musicId` and `quality`, authenticated by `X-Api-Key`. Other scripts keep the GET protocol with `source`, `songId` and `quality` query parameters and `X-API-Key`.
+
+Script results are cached for **24 hours**. Network, HTTP and timeout failures are retried after **60 seconds**; invalid scripts or scripts without `tx` after **10 minutes**. Expired caches and legacy entries without an expiry are fetched again. Concurrent requests for the same script URL share one download. Script reads are limited to 256 KiB (plus one byte to detect oversized responses); audio verification reads only the first 8 KiB, cancels the remaining response and refuses redirects.
 
 Differences to be aware of:
 

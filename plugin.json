@@ -1,23 +1,73 @@
 {
   "id": "qqmusic",
   "name": "QQ Music",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "minAppVersion": "0.1.8",
   "main": "dist/index.js",
   "icon": "icon.png",
   "playback": "stream",
-  "permissions": { "network": ["*"] },
+  "permissions": {
+    "network": [
+      "*"
+    ]
+  },
   "settings": [
-    { "key": "loginMethod", "label": "Login method", "help": "Enter QQ or WeChat. Leave empty for QQ.", "helpForText": true, "options": [{ "value": "qq", "label": "QQ" }, { "value": "wechat", "label": "WeChat" }] },
-    { "key": "externalSourceEnabled", "label": "Use external source", "type": "boolean", "help": "Resolve the audio link from an LX source first, then fall back to official playback. No external request is made while this is off." },
-    { "key": "externalSourceScript", "label": "LX script URL", "help": "Full LX script URL starting with https://, e.g. https://source.shiqianjiang.cn/api/script/lx?key=… . The plugin reads the declared endpoint only and never executes the script." }
+    {
+      "key": "loginMethod",
+      "label": "Login method",
+      "help": "Enter QQ or WeChat. Leave empty for QQ.",
+      "helpForText": true,
+      "options": [
+        {
+          "value": "qq",
+          "label": "QQ"
+        },
+        {
+          "value": "wechat",
+          "label": "WeChat"
+        }
+      ]
+    },
+    {
+      "key": "externalSourceEnabled",
+      "label": "Use external source",
+      "type": "boolean",
+      "help": "Resolve the audio link from an LX source first, then fall back to official playback. No external request is made while this is off."
+    },
+    {
+      "key": "externalSourceScript",
+      "label": "LX script URL",
+      "help": "Full LX script URL starting with https://, e.g. https://source.shiqianjiang.cn/api/script/lx?key=… . The plugin reads the declared endpoint only and never executes the script."
+    },
+    {
+      "key": "externalSourceBackupScript",
+      "label": "Backup LX script URL",
+      "type": "text",
+      "help": "Backup LX script URL. Automatically tried when the primary script fails."
+    }
   ],
   "navigation": [
-    { "builtin": "home" },
-    { "title": "Featured Playlists", "page": "playlists", "icon": "playlist" },
-    { "title": "Charts", "page": "charts", "icon": "chart" },
-    { "builtin": "liked" },
-    { "builtin": "savedAlbums" },
-    { "builtin": "stations" }
+    {
+      "builtin": "home"
+    },
+    {
+      "title": "Featured Playlists",
+      "page": "playlists",
+      "icon": "playlist"
+    },
+    {
+      "title": "Charts",
+      "page": "charts",
+      "icon": "chart"
+    },
+    {
+      "builtin": "liked"
+    },
+    {
+      "builtin": "savedAlbums"
+    },
+    {
+      "builtin": "stations"
+    }
   ]
 }

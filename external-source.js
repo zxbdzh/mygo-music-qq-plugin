@@ -4,6 +4,8 @@
 // 任一环节失败都静默回落官方取流，不修改 session、不写 storage（脚本缓存除外）。
 const SOURCE = "tx";
 const CACHE_PREFIX = "qqmusic.lx-script.";
+const CACHE_TTL = { success: 24 * 60 * 60 * 1000, network: 60 * 1000, script: 10 * 60 * 1000 };
+const scriptLoads = new Map();
 const SCRIPT_TIMEOUT = 5000;
 const MUSIC_TIMEOUT = 8000;
 const SCRIPT_LIMIT = 262144;
@@ -17,10 +19,9 @@ function setting(key) {
   try { return String(typeof host.setting === "function" ? host.setting(key) ?? "" : ""); } catch { return ""; }
 }
 
-function scriptURL() {
-  if (setting("externalSourceEnabled") !== "true") return null;
-  const script = setting("externalSourceScript");
-  return /^https:\/\/\S+$/.test(script) ? script : null;
+function scriptURLs() {
+  if (setting("externalSourceEnabled") !== "true") return [];
+  return [setting("externalSourceScript"), setting("externalSourceBackupScript")].filter(Boolean);
 }
 
 function safeURL(value) {
@@ -42,7 +43,8 @@ function parseScript(text) {
   try { safeURL(apiUrl); } catch { return null; }
   const key = /\bAPI_KEY\s*=\s*["'`]([^"'`\s]+)["'`]/.exec(text)?.[1] || "";
   // 平台名在对象字面量与 JSON.parse 两种写法里都带引号，一个正则即可判定。
-  return { apiUrl, key, supported: /["']tx["']\s*:/.test(text) };
+  const protocol = /\bmethod\s*:\s*["']POST["']/.test(text) && /\bmusicId\b/.test(text) ? "post" : "get";
+  return { apiUrl, key, supported: /["']tx["']\s*:/.test(text), protocol };
 }
 
 function urlKey(script) {
@@ -53,12 +55,43 @@ function digest(text) {
   try { return host.crypto.md5(text); } catch { return null; }
 }
 
+async function readBytes(reply, limit) {
+  if (!reply.body) return new Uint8Array();
+  const reader = reply.body.getReader();
+  const bytes = new Uint8Array(limit);
+  let length = 0;
+  try {
+    while (length < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value.subarray(0, limit - length);
+      bytes.set(chunk, length);
+      length += chunk.length;
+    }
+    return bytes.subarray(0, length);
+  } finally {
+    // 宿主 moejs 支持响应流；取消剩余数据，不能信任服务器一定遵守 Range。
+    try { await reader.cancel(); } finally { reader.releaseLock(); }
+  }
+}
+
 async function loadScript(script) {
   // 缓存键含脚本地址：换地址（含换 key）即换键，自然会重新拉取。
   const hash = digest(script);
   const cacheKey = hash ? CACHE_PREFIX + hash : null;
-  const cached = cacheKey ? host.storage.get(cacheKey) : null;
-  if (cached && cached.v === 1) return cached;
+  let cached;
+  try { cached = cacheKey ? host.storage.get(cacheKey) : null; } catch { /* 缓存不可读时仍可重新拉取。 */ }
+  // 旧成功缓存没有协议，须重新解析，避免把 POST 音源误当作 GET。
+  if (cached && cached.v === 1 && Number.isFinite(cached.expiresAt) && cached.expiresAt > Date.now()
+    && (!cached.ok || cached.protocol === "get" || cached.protocol === "post")) return cached;
+  if (scriptLoads.has(script)) return scriptLoads.get(script);
+  // 只合并同一地址的在途脚本请求，取流仍按歌曲与音质分别执行。
+  const pending = fetchScript(script, cacheKey);
+  scriptLoads.set(script, pending);
+  try { return await pending; } finally { scriptLoads.delete(script); }
+}
+
+async function fetchScript(script, cacheKey) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SCRIPT_TIMEOUT);
   let entry;
@@ -68,16 +101,21 @@ async function loadScript(script) {
       headers: { "User-Agent": UA },
     });
     if (!reply || reply.status !== 200) throw new Error("script status");
-    const parsed = parseScript(await reply.text());
+    const bytes = await readBytes(reply, SCRIPT_LIMIT + 1);
+    const parsed = bytes.length > SCRIPT_LIMIT ? null : parseScript(new TextDecoder().decode(bytes));
     entry = parsed
-      ? { v: 1, ok: true, apiUrl: parsed.apiUrl, key: parsed.key || urlKey(script), supported: parsed.supported }
+      ? { v: 1, ok: true, apiUrl: parsed.apiUrl, key: parsed.key || urlKey(script), supported: parsed.supported, protocol: parsed.protocol }
       : { v: 1, ok: false, reason: "script" };
   } catch (error) {
-    // 失败也缓存，避免每首歌重复拉同一份坏脚本。
-    entry = { v: 1, ok: false, reason: error && error.name === "AbortError" ? "timeout" : "script" };
+    // 网络故障只短暂退避，避免恢复后仍被坏缓存挡住。
+    entry = { v: 1, ok: false, reason: error && error.name === "AbortError" ? "timeout" : "network" };
   } finally {
     clearTimeout(timer);
+    controller.abort();
   }
+  const ttl = entry.ok ? (entry.supported ? CACHE_TTL.success : CACHE_TTL.script)
+    : entry.reason === "script" ? CACHE_TTL.script : CACHE_TTL.network;
+  entry.expiresAt = Date.now() + ttl;
   if (cacheKey) { try { host.storage.set(cacheKey, entry); } catch { /* 缓存失败不影响播放。 */ } }
   return entry;
 }
@@ -87,9 +125,9 @@ async function verify(url) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MUSIC_TIMEOUT);
   try {
-    const reply = await fetch(url, { headers: { Range: "bytes=0-8191" }, signal: controller.signal });
+    const reply = await fetch(url, { headers: { Range: "bytes=0-8191" }, redirect: "error", signal: controller.signal });
     if (!reply || (reply.status !== 200 && reply.status !== 206)) return null;
-    const bytes = new Uint8Array(await reply.arrayBuffer());
+    const bytes = await readBytes(reply, 8192);
     if (bytes.length < 8) return null;
     const tag = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
     if (tag === "fLaC") return "flac";
@@ -103,20 +141,28 @@ async function verify(url) {
     return null;
   } finally {
     clearTimeout(timer);
+    controller.abort();
   }
 }
 
 async function resolve(entry, id, quality) {
   const target = new URL(entry.apiUrl.replace(/\/+$/, "") + "/music/url");
-  target.searchParams.set("source", SOURCE);
-  target.searchParams.set("songId", id);
-  target.searchParams.set("quality", QUALITY[quality] || QUALITY.high);
+  const params = { source: SOURCE, quality: QUALITY[quality] || QUALITY.high };
+  const post = entry.protocol === "post";
+  if (!post) {
+    target.searchParams.set("source", params.source);
+    target.searchParams.set("songId", id);
+    target.searchParams.set("quality", params.quality);
+  }
   const headers = { "User-Agent": UA, "Content-Type": "application/json" };
-  if (entry.key) headers["X-API-Key"] = entry.key;
+  if (entry.key) headers[post ? "X-Api-Key" : "X-API-Key"] = entry.key;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MUSIC_TIMEOUT);
   try {
-    const reply = await fetch(target.href, { method: "GET", headers, signal: controller.signal });
+    const reply = await fetch(target.href, {
+      method: post ? "POST" : "GET", headers, signal: controller.signal,
+      ...(post ? { body: JSON.stringify({ source: params.source, musicId: id, quality: params.quality }) } : {}),
+    });
     if (!reply || reply.status !== 200) throw new Error("music status");
     const payload = await reply.json();
     if (!payload || payload.code !== 200 || typeof payload.url !== "string" || !payload.url) throw new Error("music payload");
@@ -139,18 +185,20 @@ async function resolve(entry, id, quality) {
 
 // 成功返回 stream 结果，任何失败返回 null，由调用方继续走官方取流。
 export async function externalStream(id, quality) {
-  const script = scriptURL();
-  if (!script) return null;
   if (typeof id !== "string" || !/^[0-9a-zA-Z]{10,20}$/.test(id)) return null;
-  try {
-    const entry = await loadScript(script);
-    if (!entry.ok) throw Object.assign(new Error("script"), { reason: entry.reason });
-    if (!entry.supported) throw Object.assign(new Error("unsupported"), { reason: "unsupported" });
-    return await resolve(entry, id, quality);
-  } catch (error) {
-    // 只记录归一化原因，绝不带出 key、脚本地址或带签名的直链。
-    const reason = (error && error.reason) || (error && error.name === "AbortError" ? "timeout" : "failure");
-    try { console.warn(`external source fallback: ${reason}`); } catch { /* 日志不是播放前提。 */ }
-    return null;
+  for (const script of scriptURLs()) {
+    try {
+      if (!/^https:\/\/\S+$/.test(script)) throw Object.assign(new Error("script"), { reason: "script" });
+      const entry = await loadScript(script);
+      if (!entry.ok) throw Object.assign(new Error("script"), { reason: entry.reason });
+      if (!entry.supported) throw Object.assign(new Error("unsupported"), { reason: "unsupported" });
+      return await resolve(entry, id, quality);
+    } catch (error) {
+      // 原因只允许固定枚举，网络异常或坏缓存也不能把 key、地址和直链带进日志。
+      const reason = ["script", "unsupported", "timeout", "network"].includes(error && error.reason)
+        ? error.reason : error && error.name === "AbortError" ? "timeout" : "failure";
+      try { console.warn(`external source fallback: ${reason}`); } catch { /* 日志不是播放前提。 */ }
+    }
   }
+  return null;
 }

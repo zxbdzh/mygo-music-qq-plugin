@@ -14281,6 +14281,8 @@ function wechatCookieFetch(fetch2) {
 // external-source.js
 var SOURCE = "tx";
 var CACHE_PREFIX = "qqmusic.lx-script.";
+var CACHE_TTL = { success: 24 * 60 * 60 * 1e3, network: 60 * 1e3, script: 10 * 60 * 1e3 };
+var scriptLoads = /* @__PURE__ */ new Map();
 var SCRIPT_TIMEOUT = 5e3;
 var MUSIC_TIMEOUT = 8e3;
 var SCRIPT_LIMIT = 262144;
@@ -14295,10 +14297,9 @@ function setting(key) {
     return "";
   }
 }
-function scriptURL() {
-  if (setting("externalSourceEnabled") !== "true") return null;
-  const script = setting("externalSourceScript");
-  return /^https:\/\/\S+$/.test(script) ? script : null;
+function scriptURLs() {
+  if (setting("externalSourceEnabled") !== "true") return [];
+  return [setting("externalSourceScript"), setting("externalSourceBackupScript")].filter(Boolean);
 }
 function safeURL(value) {
   if (typeof value !== "string" || !value || value.length > 16384) throw new Error("unsafe url");
@@ -14324,7 +14325,8 @@ function parseScript(text) {
     return null;
   }
   const key = /\bAPI_KEY\s*=\s*["'`]([^"'`\s]+)["'`]/.exec(text)?.[1] || "";
-  return { apiUrl, key, supported: /["']tx["']\s*:/.test(text) };
+  const protocol = /\bmethod\s*:\s*["']POST["']/.test(text) && /\bmusicId\b/.test(text) ? "post" : "get";
+  return { apiUrl, key, supported: /["']tx["']\s*:/.test(text), protocol };
 }
 function urlKey(script) {
   try {
@@ -14340,11 +14342,47 @@ function digest(text) {
     return null;
   }
 }
+async function readBytes(reply, limit) {
+  if (!reply.body) return new Uint8Array();
+  const reader = reply.body.getReader();
+  const bytes2 = new Uint8Array(limit);
+  let length = 0;
+  try {
+    while (length < limit) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = value.subarray(0, limit - length);
+      bytes2.set(chunk, length);
+      length += chunk.length;
+    }
+    return bytes2.subarray(0, length);
+  } finally {
+    try {
+      await reader.cancel();
+    } finally {
+      reader.releaseLock();
+    }
+  }
+}
 async function loadScript(script) {
   const hash = digest(script);
   const cacheKey = hash ? CACHE_PREFIX + hash : null;
-  const cached = cacheKey ? host.storage.get(cacheKey) : null;
-  if (cached && cached.v === 1) return cached;
+  let cached;
+  try {
+    cached = cacheKey ? host.storage.get(cacheKey) : null;
+  } catch {
+  }
+  if (cached && cached.v === 1 && Number.isFinite(cached.expiresAt) && cached.expiresAt > Date.now() && (!cached.ok || cached.protocol === "get" || cached.protocol === "post")) return cached;
+  if (scriptLoads.has(script)) return scriptLoads.get(script);
+  const pending = fetchScript(script, cacheKey);
+  scriptLoads.set(script, pending);
+  try {
+    return await pending;
+  } finally {
+    scriptLoads.delete(script);
+  }
+}
+async function fetchScript(script, cacheKey) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), SCRIPT_TIMEOUT);
   let entry;
@@ -14356,13 +14394,17 @@ async function loadScript(script) {
       headers: { "User-Agent": UA }
     });
     if (!reply || reply.status !== 200) throw new Error("script status");
-    const parsed = parseScript(await reply.text());
-    entry = parsed ? { v: 1, ok: true, apiUrl: parsed.apiUrl, key: parsed.key || urlKey(script), supported: parsed.supported } : { v: 1, ok: false, reason: "script" };
+    const bytes2 = await readBytes(reply, SCRIPT_LIMIT + 1);
+    const parsed = bytes2.length > SCRIPT_LIMIT ? null : parseScript(new TextDecoder().decode(bytes2));
+    entry = parsed ? { v: 1, ok: true, apiUrl: parsed.apiUrl, key: parsed.key || urlKey(script), supported: parsed.supported, protocol: parsed.protocol } : { v: 1, ok: false, reason: "script" };
   } catch (error) {
-    entry = { v: 1, ok: false, reason: error && error.name === "AbortError" ? "timeout" : "script" };
+    entry = { v: 1, ok: false, reason: error && error.name === "AbortError" ? "timeout" : "network" };
   } finally {
     clearTimeout(timer);
+    controller.abort();
   }
+  const ttl = entry.ok ? entry.supported ? CACHE_TTL.success : CACHE_TTL.script : entry.reason === "script" ? CACHE_TTL.script : CACHE_TTL.network;
+  entry.expiresAt = Date.now() + ttl;
   if (cacheKey) {
     try {
       host.storage.set(cacheKey, entry);
@@ -14375,9 +14417,9 @@ async function verify(url) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MUSIC_TIMEOUT);
   try {
-    const reply = await fetch(url, { headers: { Range: "bytes=0-8191" }, signal: controller.signal });
+    const reply = await fetch(url, { headers: { Range: "bytes=0-8191" }, redirect: "error", signal: controller.signal });
     if (!reply || reply.status !== 200 && reply.status !== 206) return null;
-    const bytes2 = new Uint8Array(await reply.arrayBuffer());
+    const bytes2 = await readBytes(reply, 8192);
     if (bytes2.length < 8) return null;
     const tag = String.fromCharCode(bytes2[0], bytes2[1], bytes2[2], bytes2[3]);
     if (tag === "fLaC") return "flac";
@@ -14390,19 +14432,29 @@ async function verify(url) {
     return null;
   } finally {
     clearTimeout(timer);
+    controller.abort();
   }
 }
 async function resolve(entry, id, quality) {
   const target = new URL(entry.apiUrl.replace(/\/+$/, "") + "/music/url");
-  target.searchParams.set("source", SOURCE);
-  target.searchParams.set("songId", id);
-  target.searchParams.set("quality", QUALITY[quality] || QUALITY.high);
+  const params = { source: SOURCE, quality: QUALITY[quality] || QUALITY.high };
+  const post = entry.protocol === "post";
+  if (!post) {
+    target.searchParams.set("source", params.source);
+    target.searchParams.set("songId", id);
+    target.searchParams.set("quality", params.quality);
+  }
   const headers2 = { "User-Agent": UA, "Content-Type": "application/json" };
-  if (entry.key) headers2["X-API-Key"] = entry.key;
+  if (entry.key) headers2[post ? "X-Api-Key" : "X-API-Key"] = entry.key;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MUSIC_TIMEOUT);
   try {
-    const reply = await fetch(target.href, { method: "GET", headers: headers2, signal: controller.signal });
+    const reply = await fetch(target.href, {
+      method: post ? "POST" : "GET",
+      headers: headers2,
+      signal: controller.signal,
+      ...post ? { body: JSON.stringify({ source: params.source, musicId: id, quality: params.quality }) } : {}
+    });
     if (!reply || reply.status !== 200) throw new Error("music status");
     const payload = await reply.json();
     if (!payload || payload.code !== 200 || typeof payload.url !== "string" || !payload.url) throw new Error("music payload");
@@ -14422,22 +14474,23 @@ async function resolve(entry, id, quality) {
   }
 }
 async function externalStream(id, quality) {
-  const script = scriptURL();
-  if (!script) return null;
   if (typeof id !== "string" || !/^[0-9a-zA-Z]{10,20}$/.test(id)) return null;
-  try {
-    const entry = await loadScript(script);
-    if (!entry.ok) throw Object.assign(new Error("script"), { reason: entry.reason });
-    if (!entry.supported) throw Object.assign(new Error("unsupported"), { reason: "unsupported" });
-    return await resolve(entry, id, quality);
-  } catch (error) {
-    const reason = error && error.reason || (error && error.name === "AbortError" ? "timeout" : "failure");
+  for (const script of scriptURLs()) {
     try {
-      console.warn(`external source fallback: ${reason}`);
-    } catch {
+      if (!/^https:\/\/\S+$/.test(script)) throw Object.assign(new Error("script"), { reason: "script" });
+      const entry = await loadScript(script);
+      if (!entry.ok) throw Object.assign(new Error("script"), { reason: entry.reason });
+      if (!entry.supported) throw Object.assign(new Error("unsupported"), { reason: "unsupported" });
+      return await resolve(entry, id, quality);
+    } catch (error) {
+      const reason = ["script", "unsupported", "timeout", "network"].includes(error && error.reason) ? error.reason : error && error.name === "AbortError" ? "timeout" : "failure";
+      try {
+        console.warn(`external source fallback: ${reason}`);
+      } catch {
+      }
     }
-    return null;
   }
+  return null;
 }
 
 // index.js
