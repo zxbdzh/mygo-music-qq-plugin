@@ -30,7 +30,7 @@ The plugin only reads the endpoint, key and whether the script declares QQ (`tx`
 Differences to be aware of:
 
 - With the external source on, the plugin does not check membership or region; whatever the source returns is played. The upstream statement about "not bypassing permissions" only describes the official path.
-- High/Standard requests are labelled `mp3`, only the lossless request is labelled `flac`.
+- High/Standard requests are labelled `mp3`, only the lossless request is labelled `flac`; the container is checked before playback, so a dead link falls back instead of failing.
 - Availability depends on a third-party service; this fork makes no claim about its stability or licensing.
 
 > **Permission note:** the script and endpoint hosts are entered by you and cannot be listed in advance, so the plugin asks for access to any website. No external request is made while **Use external source** is off.

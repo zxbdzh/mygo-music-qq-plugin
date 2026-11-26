@@ -82,6 +82,30 @@ async function loadScript(script) {
   return entry;
 }
 
+async function verify(url) {
+  // 接口回 code=200 不代表链接能播（实测 flac24bit/hires 给 403 死链），取前 8KB 认容器。
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MUSIC_TIMEOUT);
+  try {
+    const reply = await fetch(url, { headers: { Range: "bytes=0-8191" }, signal: controller.signal });
+    if (!reply || (reply.status !== 200 && reply.status !== 206)) return null;
+    const bytes = new Uint8Array(await reply.arrayBuffer());
+    if (bytes.length < 8) return null;
+    const tag = String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3]);
+    if (tag === "fLaC") return "flac";
+    if (tag === "OggS") return "ogg";
+    if (tag === "RIFF") return "wav";
+    if (String.fromCharCode(bytes[4], bytes[5], bytes[6], bytes[7]) === "ftyp") return "m4a";
+    // MP3 可能带 ID3 头，也可能直接是帧同步；两种都要认。
+    if (tag.startsWith("ID3") || (bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0)) return "mp3";
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function resolve(entry, id, quality) {
   const target = new URL(entry.apiUrl.replace(/\/+$/, "") + "/music/url");
   target.searchParams.set("source", SOURCE);
@@ -97,12 +121,14 @@ async function resolve(entry, id, quality) {
     const payload = await reply.json();
     if (!payload || payload.code !== 200 || typeof payload.url !== "string" || !payload.url) throw new Error("music payload");
     const url = safeURL(payload.url.replace(/^http:\/\//i, "https://"));
-    // QQ 的 320k/128k 是 MP3，只有 flac 档才是无损；不能沿用汽水的 m4a 回填。
-    const declared = typeof payload.quality === "string" ? payload.quality.toLowerCase() : "";
-    const flac = declared === "flac" || (declared === "" && quality === "lossless" && /\.flac$/i.test(new URL(url).pathname));
+    // 容器以字节为准：QQ 的 flac 已是 24bit，更高的 flac24bit/hires 是死链，
+    // 所以这里只请求 flac，但仍要确认拿到的是真音频。
+    const type = await verify(url);
+    if (!type) throw new Error("unplayable");
+    const lossless = type === "flac";
     return {
-      url, type: flac ? "flac" : "mp3",
-      quality: flac ? "lossless" : quality === "standard" ? "standard" : "high",
+      url, type,
+      quality: lossless ? "lossless" : quality === "standard" ? "standard" : "high",
       size: 0,
       headers: { Referer: "https://y.qq.com/", "User-Agent": "Mozilla/5.0" },
     };

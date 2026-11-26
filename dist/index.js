@@ -14371,6 +14371,27 @@ async function loadScript(script) {
   }
   return entry;
 }
+async function verify(url) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MUSIC_TIMEOUT);
+  try {
+    const reply = await fetch(url, { headers: { Range: "bytes=0-8191" }, signal: controller.signal });
+    if (!reply || reply.status !== 200 && reply.status !== 206) return null;
+    const bytes2 = new Uint8Array(await reply.arrayBuffer());
+    if (bytes2.length < 8) return null;
+    const tag = String.fromCharCode(bytes2[0], bytes2[1], bytes2[2], bytes2[3]);
+    if (tag === "fLaC") return "flac";
+    if (tag === "OggS") return "ogg";
+    if (tag === "RIFF") return "wav";
+    if (String.fromCharCode(bytes2[4], bytes2[5], bytes2[6], bytes2[7]) === "ftyp") return "m4a";
+    if (tag.startsWith("ID3") || bytes2[0] === 255 && (bytes2[1] & 224) === 224) return "mp3";
+    return null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 async function resolve(entry, id, quality) {
   const target = new URL(entry.apiUrl.replace(/\/+$/, "") + "/music/url");
   target.searchParams.set("source", SOURCE);
@@ -14386,12 +14407,13 @@ async function resolve(entry, id, quality) {
     const payload = await reply.json();
     if (!payload || payload.code !== 200 || typeof payload.url !== "string" || !payload.url) throw new Error("music payload");
     const url = safeURL(payload.url.replace(/^http:\/\//i, "https://"));
-    const declared = typeof payload.quality === "string" ? payload.quality.toLowerCase() : "";
-    const flac = declared === "flac" || declared === "" && quality === "lossless" && /\.flac$/i.test(new URL(url).pathname);
+    const type = await verify(url);
+    if (!type) throw new Error("unplayable");
+    const lossless = type === "flac";
     return {
       url,
-      type: flac ? "flac" : "mp3",
-      quality: flac ? "lossless" : quality === "standard" ? "standard" : "high",
+      type,
+      quality: lossless ? "lossless" : quality === "standard" ? "standard" : "high",
       size: 0,
       headers: { Referer: "https://y.qq.com/", "User-Agent": "Mozilla/5.0" }
     };

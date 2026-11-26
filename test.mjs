@@ -260,57 +260,70 @@ test('comments use the anonymous endpoint even after signing in', async () => {
   };
   assert.deepEqual((await plugin.comments({ trackId: mid })).comments, []);
 });
-
 // ---- 外部 LX 音源 ----
 const LX_SCRIPT = 'https://audio-source.test/api/script/lx?key=fixture-key';
 const LX_API = 'https://audio-source.test/api';
+const LX_CDN = 'https://ws.stream.qqmusic.qq.com';
 const LX_SCRIPT_BODY = 'const API_URL = "https://audio-source.test/api";\nconst API_KEY = "fixture-key";\nconst MUSIC_QUALITY = {"tx":["128k","320k","flac"]};';
 const LX_TX_MISSING = 'const API_URL = "https://audio-source.test/api";\nconst MUSIC_QUALITY = {"wy":["128k","320k","flac"]};';
+const FLAC_HEAD = [0x66, 0x4c, 0x61, 0x43, 0x00, 0x00, 0x00, 0x22];
+const MP3_HEAD = [0x49, 0x44, 0x33, 0x04, 0x00, 0x00, 0x00, 0x00];
 const lxOn = () => { settings = { externalSourceEnabled: 'true', externalSourceScript: LX_SCRIPT }; };
+const audioReply = (head, status = 206) => new Response(Uint8Array.from(head), { status });
 const officialStream = (_input, init) => response(envelope(
   JSON.parse(init.body).req_0.method === 'get_song_detail_yqq'
     ? { track_info: { mid, file: { media_mid: 'media-mid' } } }
     : { sip: ['https://stream.qqmusic.qq.com/'], midurlinfo: [{ songmid: mid, purl: 'fixture.mp3' }] }));
+function lxRoute({ script = LX_SCRIPT_BODY, payload = { code: 200, url: LX_CDN + '/a.flac' }, media = () => audioReply(FLAC_HEAD) } = {}) {
+  return (input) => {
+    const target = String(input);
+    if (target === LX_SCRIPT) return new Response(script);
+    if (target.startsWith(LX_API + '/music/url')) return response(payload);
+    if (target.startsWith(LX_CDN)) return media(target);
+    throw new Error('unexpected ' + target);
+  };
+}
 
 test('external source returns the LX link and skips vkey', async () => {
   lxOn();
-  respond = (input) => {
-    if (String(input) === LX_SCRIPT) return new Response(LX_SCRIPT_BODY);
-    if (String(input).startsWith(LX_API + '/music/url')) return response({ code: 200, url: 'https://ws.stream.qqmusic.qq.com/a.flac' });
-    throw new Error('unexpected ' + input);
-  };
+  respond = lxRoute();
   const result = await plugin.stream({ id: mid, quality: 'lossless' });
   assert.equal(result.type, 'flac');
   assert.equal(result.quality, 'lossless');
-  assert.equal(result.url, 'https://ws.stream.qqmusic.qq.com/a.flac');
+  assert.equal(result.url, LX_CDN + '/a.flac');
   assert.ok(!requested().includes('vkey'));
 });
 
-test('320k is reported as mp3, never flac', async () => {
+test('the container decides the type, not the requested quality', async () => {
   lxOn();
-  respond = (input) => String(input) === LX_SCRIPT
-    ? new Response(LX_SCRIPT_BODY)
-    : response({ code: 200, url: 'https://ws.stream.qqmusic.qq.com/b.mp3' });
-  const result = await plugin.stream({ id: mid, quality: 'high' });
+  respond = lxRoute({ media: () => audioReply(MP3_HEAD) });
+  const result = await plugin.stream({ id: mid, quality: 'lossless' });
   assert.equal(result.type, 'mp3');
-  assert.equal(result.quality, 'high');
+  assert.equal(result.quality, 'high', '降档后不能仍标无损');
+});
+
+test('a dead media link falls back to the official path', async () => {
+  lxOn();
+  const route = lxRoute({ media: () => audioReply([], 403) });
+  respond = (input, init) => String(input).startsWith('https://u.y.qq.com') ? officialStream(input, init) : route(input);
+  const result = await plugin.stream({ id: mid, quality: 'lossless' });
+  assert.equal(result.url, 'https://stream.qqmusic.qq.com/fixture.mp3');
+  assert.ok(requested().includes('vkey'));
 });
 
 test('a script without tx falls back to the official path', async () => {
-  settings = { externalSourceEnabled: 'true', externalSourceScript: LX_SCRIPT };
-  respond = (input, init) => String(input) === LX_SCRIPT ? new Response(LX_TX_MISSING) : officialStream(input, init);
+  lxOn();
+  const route = lxRoute({ script: LX_TX_MISSING });
+  respond = (input, init) => String(input).startsWith('https://u.y.qq.com') ? officialStream(input, init) : route(input);
   const result = await plugin.stream({ id: mid, quality: 'standard' });
   assert.equal(result.url, 'https://stream.qqmusic.qq.com/fixture.mp3');
-  assert.ok(requested().includes('vkey'));
 });
 
 test('the script is pulled once per URL', async () => {
   lxOn();
   let pulled = 0;
-  respond = (input) => {
-    if (String(input) === LX_SCRIPT) { pulled++; return new Response(LX_SCRIPT_BODY); }
-    return response({ code: 200, url: 'https://ws.stream.qqmusic.qq.com/c.mp3' });
-  };
+  const route = lxRoute();
+  respond = (input) => { if (String(input) === LX_SCRIPT) pulled++; return route(input); };
   await plugin.stream({ id: mid, quality: 'standard' });
   await plugin.stream({ id: '000SecondMid001', quality: 'standard' });
   assert.equal(pulled, 1);
@@ -319,9 +332,11 @@ test('the script is pulled once per URL', async () => {
 test('a non-songmid id skips the external source entirely', async () => {
   lxOn();
   let scripts = 0;
+  const route = lxRoute();
   respond = (input, init) => {
-    if (String(input) === LX_SCRIPT) { scripts++; return new Response(LX_SCRIPT_BODY); }
-    return officialStream(input, init);
+    if (String(input) === LX_SCRIPT) scripts++;
+    if (String(input).startsWith('https://u.y.qq.com')) return officialStream(input, init);
+    return route(input);
   };
   await plugin.stream({ id: 'program:123', quality: 'standard' }).catch(() => {});
   assert.equal(scripts, 0);
