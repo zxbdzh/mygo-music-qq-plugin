@@ -2,6 +2,7 @@ import { qqSignIn } from './auth-qq.js';
 import { wechatSignIn, wechatDeviceComm, refreshWechatSession } from './auth-wechat.js';
 import { decodeQR } from './qr.js';
 import { wechatRandom, wechatCookieFetch } from './wechat-host.js';
+import { externalStream } from './external-source.js';
 
 const API = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const headers = { "Content-Type": "application/json", "Referer": "https://y.qq.com/", "User-Agent": "Mozilla/5.0" };
@@ -88,6 +89,9 @@ export async function suggest({ query }) {
 }
 
 export async function stream({ id, quality = "standard" }) {
+  // 外部音源只认正常 songmid；失败返回 null，继续走官方取流。
+  const external = await externalStream(id, quality);
+  if (external) return external;
   const detail = await rpc("music.pf_song_detail_svr", "get_song_detail_yqq", { song_type: 0, song_mid: id, song_id: "0" });
   const t = detail.track_info;
   if (!t || (t.mid || t.songmid) !== id) fail("unavailable", "Song details are unavailable");

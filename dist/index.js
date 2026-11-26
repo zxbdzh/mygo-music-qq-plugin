@@ -14278,6 +14278,146 @@ function wechatCookieFetch(fetch2) {
   };
 }
 
+// external-source.js
+var SOURCE = "tx";
+var CACHE_PREFIX = "qqmusic.lx-script.";
+var SCRIPT_TIMEOUT = 5e3;
+var MUSIC_TIMEOUT = 8e3;
+var SCRIPT_LIMIT = 262144;
+var UA = "lx-music-desktop/2.99.0";
+var QUALITY = { standard: "128k", high: "320k", lossless: "flac" };
+var IPV4 = /^(?:0\.|10\.|127\.|169\.254\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/;
+var IPV6 = /^(?:\[::1?\]$|\[::ffff:|\[f[cd][0-9a-f]{0,2}:)/i;
+function setting(key) {
+  try {
+    return String(typeof host.setting === "function" ? host.setting(key) ?? "" : "");
+  } catch {
+    return "";
+  }
+}
+function scriptURL() {
+  if (setting("externalSourceEnabled") !== "true") return null;
+  const script = setting("externalSourceScript");
+  return /^https:\/\/\S+$/.test(script) ? script : null;
+}
+function safeURL(value) {
+  if (typeof value !== "string" || !value || value.length > 16384) throw new Error("unsafe url");
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("unsafe url");
+  }
+  if (url.protocol !== "https:" || url.username || url.password) throw new Error("unsafe url");
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (!hostname || hostname === "localhost" || hostname.endsWith(".localhost")) throw new Error("unsafe url");
+  if (IPV4.test(hostname) || IPV6.test(hostname)) throw new Error("unsafe url");
+  return value;
+}
+function parseScript(text) {
+  if (typeof text !== "string" || !text || text.length > SCRIPT_LIMIT) return null;
+  const apiUrl = /\bAPI_URL\s*=\s*["'`](https?:\/\/[^"'`\s]+)["'`]/.exec(text)?.[1];
+  if (!apiUrl) return null;
+  try {
+    safeURL(apiUrl);
+  } catch {
+    return null;
+  }
+  const key = /\bAPI_KEY\s*=\s*["'`]([^"'`\s]+)["'`]/.exec(text)?.[1] || "";
+  return { apiUrl, key, supported: /["']tx["']\s*:/.test(text) };
+}
+function urlKey(script) {
+  try {
+    return new URL(script).searchParams.get("key") || "";
+  } catch {
+    return "";
+  }
+}
+function digest(text) {
+  try {
+    return host.crypto.md5(text);
+  } catch {
+    return null;
+  }
+}
+async function loadScript(script) {
+  const hash = digest(script);
+  const cacheKey = hash ? CACHE_PREFIX + hash : null;
+  const cached = cacheKey ? host.storage.get(cacheKey) : null;
+  if (cached && cached.v === 1) return cached;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SCRIPT_TIMEOUT);
+  let entry;
+  try {
+    const reply = await fetch(script, {
+      method: "GET",
+      redirect: "error",
+      signal: controller.signal,
+      headers: { "User-Agent": UA }
+    });
+    if (!reply || reply.status !== 200) throw new Error("script status");
+    const parsed = parseScript(await reply.text());
+    entry = parsed ? { v: 1, ok: true, apiUrl: parsed.apiUrl, key: parsed.key || urlKey(script), supported: parsed.supported } : { v: 1, ok: false, reason: "script" };
+  } catch (error) {
+    entry = { v: 1, ok: false, reason: error && error.name === "AbortError" ? "timeout" : "script" };
+  } finally {
+    clearTimeout(timer);
+  }
+  if (cacheKey) {
+    try {
+      host.storage.set(cacheKey, entry);
+    } catch {
+    }
+  }
+  return entry;
+}
+async function resolve(entry, id, quality) {
+  const target = new URL(entry.apiUrl.replace(/\/+$/, "") + "/music/url");
+  target.searchParams.set("source", SOURCE);
+  target.searchParams.set("songId", id);
+  target.searchParams.set("quality", QUALITY[quality] || QUALITY.high);
+  const headers2 = { "User-Agent": UA, "Content-Type": "application/json" };
+  if (entry.key) headers2["X-API-Key"] = entry.key;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MUSIC_TIMEOUT);
+  try {
+    const reply = await fetch(target.href, { method: "GET", headers: headers2, signal: controller.signal });
+    if (!reply || reply.status !== 200) throw new Error("music status");
+    const payload = await reply.json();
+    if (!payload || payload.code !== 200 || typeof payload.url !== "string" || !payload.url) throw new Error("music payload");
+    const url = safeURL(payload.url.replace(/^http:\/\//i, "https://"));
+    const declared = typeof payload.quality === "string" ? payload.quality.toLowerCase() : "";
+    const flac = declared === "flac" || declared === "" && quality === "lossless" && /\.flac$/i.test(new URL(url).pathname);
+    return {
+      url,
+      type: flac ? "flac" : "mp3",
+      quality: flac ? "lossless" : quality === "standard" ? "standard" : "high",
+      size: 0,
+      headers: { Referer: "https://y.qq.com/", "User-Agent": "Mozilla/5.0" }
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function externalStream(id, quality) {
+  const script = scriptURL();
+  if (!script) return null;
+  if (typeof id !== "string" || !/^[0-9a-zA-Z]{10,20}$/.test(id)) return null;
+  try {
+    const entry = await loadScript(script);
+    if (!entry.ok) throw Object.assign(new Error("script"), { reason: entry.reason });
+    if (!entry.supported) throw Object.assign(new Error("unsupported"), { reason: "unsupported" });
+    return await resolve(entry, id, quality);
+  } catch (error) {
+    const reason = error && error.reason || (error && error.name === "AbortError" ? "timeout" : "failure");
+    try {
+      console.warn(`external source fallback: ${reason}`);
+    } catch {
+    }
+    return null;
+  }
+}
+
 // index.js
 var API = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 var headers = { "Content-Type": "application/json", "Referer": "https://y.qq.com/", "User-Agent": "Mozilla/5.0" };
@@ -14354,6 +14494,8 @@ async function suggest({ query: query3 }) {
   return [...new Set(groups.flatMap((group) => (group.itemlist || []).map((item) => item?.name).filter(Boolean)))];
 }
 async function stream({ id, quality = "standard" }) {
+  const external = await externalStream(id, quality);
+  if (external) return external;
   const detail = await rpc("music.pf_song_detail_svr", "get_song_detail_yqq", { song_type: 0, song_mid: id, song_id: "0" });
   const t = detail.track_info;
   if (!t || (t.mid || t.songmid) !== id) fail("unavailable", "Song details are unavailable");
@@ -14562,7 +14704,7 @@ async function qqFinishSignIn(value) {
 async function signIn() {
   const method = (typeof host.setting === "function" ? host.setting("loginMethod") : "").trim().toLowerCase();
   if (method && method !== "qq" && method !== "wechat" && method !== "\u5FAE\u4FE1") throw qqAuthError("Login method must be QQ or WeChat");
-  const deps = { fetch, decodeQR, prompt: (value) => host.signInPrompt(value), sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)) };
+  const deps = { fetch, decodeQR, prompt: (value) => host.signInPrompt(value), sleep: (ms) => new Promise((resolve2) => setTimeout(resolve2, ms)) };
   if (method === "wechat" || method === "\u5FAE\u4FE1") {
     deps.randomBytes = await wechatRandom(fetch, (text) => host.crypto.md5(text));
     deps.fetch = wechatCookieFetch(fetch);
