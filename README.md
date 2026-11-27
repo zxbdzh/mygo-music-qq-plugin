@@ -12,6 +12,10 @@
 
 支持 QQ 返回的逐字歌词和翻译，缺少逐字数据时回退至 LRC。目前不支持收听历史、关注歌手和发表评论。官方路径下歌曲能否完整播放由 QQ 音乐的版权、账号及地区限制决定。
 
+## 最高音质
+
+插件设置里的「最高音质」是上限：跟随播放器、标准、高音质、无损。播放器要求更高时降到所选档位，要求更低时保持原样；外部音源与官方取流都按这个档位请求。
+
 ## External source (optional, added by this fork)
 
 Off by default. When enabled, playback first asks an LX source for a direct audio link and silently falls back to the official vkey path when that fails. Your session and account data are untouched.
