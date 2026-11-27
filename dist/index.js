@@ -14522,6 +14522,20 @@ async function cgi(path, params) {
   if (body.code !== 0 || body.subcode) throw new Error(`QQ Music: ${body.code}`);
   return body;
 }
+var QUALITY_ORDER = ["standard", "high", "lossless"];
+function settingValue(key) {
+  try {
+    return String(host.setting(key) ?? "");
+  } catch {
+    return "";
+  }
+}
+function cappedQuality(quality) {
+  const limit = QUALITY_ORDER.indexOf(settingValue("qualityCeiling"));
+  if (limit < 0) return quality;
+  const index = QUALITY_ORDER.indexOf(quality);
+  return index < 0 ? QUALITY_ORDER[limit] : QUALITY_ORDER[Math.min(index, limit)];
+}
 function artistOf(a = {}) {
   const mid = a.mid || a.singermid || a.singer_mid || a.singerMid || a.singerMID || "";
   return { id: String(mid), name: a.name || a.singername || a.singer_name || a.singerName || "", imageUrl: mid ? `https://y.gtimg.cn/music/photo_new/T001R300x300M000${mid}.jpg` : "" };
@@ -14569,6 +14583,7 @@ async function suggest({ query: query3 }) {
   return [...new Set(groups.flatMap((group) => (group.itemlist || []).map((item) => item?.name).filter(Boolean)))];
 }
 async function stream({ id, quality = "standard" }) {
+  quality = cappedQuality(quality);
   const external = await externalStream(id, quality);
   if (external) return external;
   const detail = await rpc("music.pf_song_detail_svr", "get_song_detail_yqq", { song_type: 0, song_mid: id, song_id: "0" });

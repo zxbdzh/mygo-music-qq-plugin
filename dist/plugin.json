@@ -13,6 +13,30 @@
   },
   "settings": [
     {
+      "key": "qualityCeiling",
+      "label": "最高音质",
+      "type": "select",
+      "options": [
+        {
+          "value": "",
+          "label": "跟随播放器"
+        },
+        {
+          "value": "standard",
+          "label": "标准"
+        },
+        {
+          "value": "high",
+          "label": "高音质"
+        },
+        {
+          "value": "lossless",
+          "label": "无损"
+        }
+      ],
+      "help": "限制请求的最高档位：播放器要求更高时降到所选档位，要求更低时保持原样。对外部音源和官方取流都生效。"
+    },
+    {
       "key": "loginMethod",
       "label": "Login method",
       "help": "Enter QQ or WeChat. Leave empty for QQ.",

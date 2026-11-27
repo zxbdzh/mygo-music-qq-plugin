@@ -37,8 +37,20 @@ async function cgi(path, params) {
   return body;
 }
 
-function artistOf(a = {}) {
-  const mid = a.mid || a.singermid || a.singer_mid || a.singerMid || a.singerMID || "";
+// 最高音质是上限：播放器要求更高时降到所选档位，要求更低时保持原样。
+// 空值或未知档位视为跟随播放器，不改变宿主的选择。
+const QUALITY_ORDER = ["standard", "high", "lossless"];
+function settingValue(key) {
+  try { return String(host.setting(key) ?? ""); } catch { return ""; }
+}
+function cappedQuality(quality) {
+  const limit = QUALITY_ORDER.indexOf(settingValue("qualityCeiling"));
+  if (limit < 0) return quality;
+  const index = QUALITY_ORDER.indexOf(quality);
+  return index < 0 ? QUALITY_ORDER[limit] : QUALITY_ORDER[Math.min(index, limit)];
+}
+
+function artistOf(a = {}) {  const mid = a.mid || a.singermid || a.singer_mid || a.singerMid || a.singerMID || "";
   return { id: String(mid), name: a.name || a.singername || a.singer_name || a.singerName || "", imageUrl: mid ? `https://y.gtimg.cn/music/photo_new/T001R300x300M000${mid}.jpg` : "" };
 }
 
@@ -89,6 +101,8 @@ export async function suggest({ query }) {
 }
 
 export async function stream({ id, quality = "standard" }) {
+  // 用户设置的上限先生效：外部音源与官方取流都按这个档位请求。
+  quality = cappedQuality(quality);
   // 外部音源只认正常 songmid；失败返回 null，继续走官方取流。
   const external = await externalStream(id, quality);
   if (external) return external;
