@@ -14498,6 +14498,9 @@ var API = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 var headers = { "Content-Type": "application/json", "Referer": "https://y.qq.com/", "User-Agent": "Mozilla/5.0" };
 var pageSize = 20;
 var searchPages = /* @__PURE__ */ new Map();
+var QQ_SDK_URL = "https://stat6.y.qq.com/sdk/fcgi-bin/sdk.fcg";
+var QQ_REPORT_URL = "https://stat6.y.qq.com/pc/fcgi-bin/cgi_music_webreport.fcg";
+var QQ_REPORT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 function fail(code, message) {
   const error = new Error(message);
   error.code = code;
@@ -15032,6 +15035,57 @@ function createLibrary({ qqAuthRpc: qqAuthRpc2, qqReadSession: qqReadSession2, q
     if (!t || (t.mid || t.songmid) !== id) throw new Error("QQ Music song identity mismatch");
     return idNumber(t.id || t.songid, "song ID");
   }
+  async function reportSongID(id) {
+    const s = await account2();
+    return { s, numeric: await songID(s, id) };
+  }
+  async function played2({ id }) {
+    try {
+      const { s, numeric } = await reportSongID(id);
+      const body = {
+        common: { _appid: "qqmusic", _uid: s.musicid, _platform: 11, _account_source: "0", _channelid: "", _os: "pc", _app: "pc", _opertime: Math.floor(Date.now() / 1e3), _network_type: "" },
+        items: [{ cmd: "25", int1: 3, str1: "", int2: numeric, str2: "PC", int3: 0, str3: "other", int4: 0, str5: "", str6: reportTrace(), str7: "", str8: "", str9: "", str10: "" }]
+      };
+      await fetchProfile(QQ_SDK_URL, { method: "POST", headers: { "Content-Type": "application/json", "User-Agent": QQ_REPORT_UA }, body: JSON.stringify(body) });
+    } catch {
+    }
+  }
+  async function stopped2({ id, heard }) {
+    try {
+      const { s, numeric } = await reportSongID(id);
+      const seconds = Math.max(0, Math.round((Number(heard) || 0) / 1e3));
+      const started = Math.floor(Date.now() / 1e3) - seconds;
+      const query3 = [
+        ["Count", 1],
+        ["Fqq", s.musicid],
+        ["Fguid", reportGuid(s)],
+        ["Ffromtag1", 10050],
+        ["Ffromtag2", numeric],
+        ["Fsong_id", numeric],
+        ["Fplay_time", seconds],
+        ["Fstart_time", started],
+        ["Ftype", 3],
+        ["Fversion", 1],
+        ["Fid1", 0]
+      ].map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join("&");
+      await fetchProfile(`${QQ_REPORT_URL}?${query3}`, { headers: { "User-Agent": QQ_REPORT_UA } });
+    } catch {
+    }
+  }
+  function reportGuid(s) {
+    const seed = `mygo-qq-${s.musicid}`;
+    let out = "";
+    let h = 2166136261;
+    for (let i = 0; out.length < 32; i++) {
+      h ^= seed.charCodeAt(i % seed.length) + i * 31;
+      h = Math.imul(h, 16777619) >>> 0;
+      out += h.toString(16).padStart(8, "0");
+    }
+    return out.slice(0, 32);
+  }
+  function reportTrace() {
+    return `${Date.now()}${Math.floor(1e8 + Math.random() * 9e8)}`;
+  }
   async function status2(s, ids) {
     if (!Array.isArray(ids)) throw new Error("Invalid song IDs");
     ids.forEach(mid);
@@ -15211,7 +15265,9 @@ function createLibrary({ qqAuthRpc: qqAuthRpc2, qqReadSession: qqReadSession2, q
     renamePlaylist: renamePlaylist2,
     deletePlaylist: deletePlaylist2,
     addToPlaylist: (args) => editSongs(args, true),
-    removeFromPlaylist: (args) => editSongs(args, false)
+    removeFromPlaylist: (args) => editSongs(args, false),
+    played: played2,
+    stopped: stopped2
   };
 }
 var qqLibrary = createLibrary({ qqAuthRpc, qqReadSession, qqAuthCgi: cgi, cgi, trackOf });
@@ -15226,6 +15282,8 @@ var renamePlaylist = qqLibrary.renamePlaylist;
 var deletePlaylist = qqLibrary.deletePlaylist;
 var addToPlaylist = qqLibrary.addToPlaylist;
 var removeFromPlaylist = qqLibrary.removeFromPlaylist;
+var played = qqLibrary.played;
+var stopped = qqLibrary.stopped;
 async function playlist({ id }) {
   if (id.startsWith("chart:") || !qqReadSession()) return qqBrowse.playlist({ id });
   return qqLibrary.playlist({ id });
@@ -16021,6 +16079,7 @@ export {
   liked,
   lyrics,
   parseQRC,
+  played,
   playlist,
   playlists,
   qqAuthContext,
@@ -16037,6 +16096,7 @@ export {
   signOut,
   stationNext,
   stations,
+  stopped,
   stream,
   suggest
 };
