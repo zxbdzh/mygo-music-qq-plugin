@@ -8,6 +8,10 @@ const API = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const headers = { "Content-Type": "application/json", "Referer": "https://y.qq.com/", "User-Agent": "Mozilla/5.0" };
 const pageSize = 20;
 const searchPages = new Map();
+// 官方 Web 播放器的两个免签名上报通道：播放计数与播放时长信标。
+const QQ_SDK_URL = "https://stat6.y.qq.com/sdk/fcgi-bin/sdk.fcg";
+const QQ_REPORT_URL = "https://stat6.y.qq.com/pc/fcgi-bin/cgi_music_webreport.fcg";
+const QQ_REPORT_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 function fail(code, message) {
   const error = new Error(message);
@@ -580,6 +584,52 @@ export function createLibrary({ qqAuthRpc, qqReadSession, qqAuthCgi, cgi, trackO
     if (!t || (t.mid || t.songmid) !== id) throw new Error('QQ Music song identity mismatch');
     return idNumber(t.id || t.songid, 'song ID');
   }
+
+  // 官方播放上报只认数字歌曲 ID，且两个通道都不签名、不需要 Cookie。
+  // 上报失败一律吞掉：播放器把错误当成播放出问题会去恢复。
+  async function reportSongID(id) {
+    const s = await account();
+    return { s, numeric: await songID(s, id) };
+  }
+  async function played({ id }) {
+    try {
+      const { s, numeric } = await reportSongID(id);
+      const body = {
+        common: { _appid: 'qqmusic', _uid: s.musicid, _platform: 11, _account_source: '0', _channelid: '', _os: 'pc', _app: 'pc', _opertime: Math.floor(Date.now() / 1000), _network_type: '' },
+        items: [{ cmd: '25', int1: 3, str1: '', int2: numeric, str2: 'PC', int3: 0, str3: 'other', int4: 0, str5: '', str6: reportTrace(), str7: '', str8: '', str9: '', str10: '' }],
+      };
+      await fetchProfile(QQ_SDK_URL, { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': QQ_REPORT_UA }, body: JSON.stringify(body) });
+    } catch { /* 上报是尽力而为，不影响播放。 */ }
+  }
+  async function stopped({ id, heard }) {
+    try {
+      const { s, numeric } = await reportSongID(id);
+      const seconds = Math.max(0, Math.round((Number(heard) || 0) / 1000));
+      // 开播时刻按“现在减去已听时长”反推，免得多存一份状态。
+      const started = Math.floor(Date.now() / 1000) - seconds;
+      const query = [
+        ['Count', 1], ['Fqq', s.musicid], ['Fguid', reportGuid(s)], ['Ffromtag1', 10050],
+        ['Ffromtag2', numeric], ['Fsong_id', numeric], ['Fplay_time', seconds],
+        ['Fstart_time', started], ['Ftype', 3], ['Fversion', 1], ['Fid1', 0],
+      ].map(([k, v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+      await fetchProfile(`${QQ_REPORT_URL}?${query}`, { headers: { 'User-Agent': QQ_REPORT_UA } });
+    } catch { /* 同上。 */ }
+  }
+  // 官方用设备标识；按账号派生一个稳定值，重启后历史仍归到同一处，不随进程变新设备。
+  function reportGuid(s) {
+    const seed = `mygo-qq-${s.musicid}`;
+    let out = '';
+    let h = 2166136261;
+    for (let i = 0; out.length < 32; i++) {
+      h ^= seed.charCodeAt(i % seed.length) + i * 31;
+      h = Math.imul(h, 16777619) >>> 0;
+      out += h.toString(16).padStart(8, '0');
+    }
+    return out.slice(0, 32);
+  }
+  function reportTrace() {
+    return `${Date.now()}${Math.floor(100000000 + Math.random() * 900000000)}`;
+  }
   async function status(s, ids) {
     if (!Array.isArray(ids)) throw new Error('Invalid song IDs');
     ids.forEach(mid);
@@ -742,7 +792,8 @@ export function createLibrary({ qqAuthRpc, qqReadSession, qqAuthCgi, cgi, trackO
     if (await read() !== on) throw new Error('QQ Music did not confirm album saved state');
   }
   return { playlists, playlist, liked, isLiked, like, savedAlbums, saveAlbum, createPlaylist, renamePlaylist, deletePlaylist,
-    addToPlaylist: args => editSongs(args, true), removeFromPlaylist: args => editSongs(args, false) };
+    addToPlaylist: args => editSongs(args, true), removeFromPlaylist: args => editSongs(args, false),
+    played, stopped };
 }
 
 const qqLibrary = createLibrary({ qqAuthRpc, qqReadSession, qqAuthCgi: cgi, cgi, trackOf });
@@ -757,6 +808,8 @@ export const renamePlaylist = qqLibrary.renamePlaylist;
 export const deletePlaylist = qqLibrary.deletePlaylist;
 export const addToPlaylist = qqLibrary.addToPlaylist;
 export const removeFromPlaylist = qqLibrary.removeFromPlaylist;
+export const played = qqLibrary.played;
+export const stopped = qqLibrary.stopped;
 export async function playlist({ id }) {
   if (id.startsWith("chart:") || !qqReadSession()) return qqBrowse.playlist({ id });
   return qqLibrary.playlist({ id });

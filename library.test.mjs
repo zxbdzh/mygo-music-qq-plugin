@@ -249,3 +249,57 @@ test('saved playlist reports an error when both sources refuse it', async () => 
   const { lib } = setup(method => method === 'GetPlaylistByUin' ? { v_playlist: [own] } : { code: -100006 }, signed, { cgi: async () => { throw new Error('QQ Music: 10'); } });
   await assert.rejects(lib.playlist({ id: '901' }), /QQ Music: 10/);
 });
+
+// 播放上报走官方两个免签名通道，都只认数字歌曲 ID；失败静默，不打断播放。
+test('played and stopped report the play count and the play time beacon', async () => {
+  const requests = [];
+  const { lib } = setup(
+    method => { assert.equal(method, 'get_song_detail_yqq'); return { track_info: { mid: 'song1', id: 42 } }; },
+    signed,
+    { fetch: async (url, init) => { requests.push({ url, init }); return new Response('GIF89a'); } },
+  );
+  await lib.played({ id: 'song1' });
+  assert.equal(requests[0].url, 'https://stat6.y.qq.com/sdk/fcgi-bin/sdk.fcg');
+  const body = JSON.parse(requests[0].init.body);
+  assert.equal(body.items[0].cmd, '25');
+  assert.equal(body.items[0].int1, 3);
+  assert.equal(body.items[0].int2, 42);
+  assert.equal(body.common._uid, '10001');
+
+  await lib.stopped({ id: 'song1', heard: 30000, duration: 200000, finished: false });
+  assert.match(requests[1].url, /^https:\/\/stat6\.y\.qq\.com\/pc\/fcgi-bin\/cgi_music_webreport\.fcg\?/);
+  assert.match(requests[1].url, /Fsong_id=42/);
+  assert.match(requests[1].url, /Fplay_time=30/);
+  assert.match(requests[1].url, /Fqq=10001/);
+  assert.match(requests[1].url, /Fguid=[0-9a-f]{32}/);
+});
+
+// 官方只认数字歌曲 ID：歌曲详情拿不到，或没登录，就什么都不发。
+test('reporting skips a song without a numeric ID, and a signed-out listener', async () => {
+  const requests = [];
+  const handler = async (url, init) => { requests.push({ url, init }); return new Response(''); };
+  const { lib } = setup(
+    () => ({ track_info: { mid: 'song1', id: '' } }),
+    signed,
+    { fetch: handler },
+  );
+  await lib.played({ id: 'song1' });
+  await lib.stopped({ id: 'song1', heard: 30000, duration: 200000, finished: true });
+  assert.equal(requests.length, 0);
+
+  const { lib: guest } = setup(() => { throw new Error('must not read'); }, null, { fetch: handler });
+  await guest.played({ id: 'song1' });
+  await guest.stopped({ id: 'song1', heard: 30000, duration: 200000, finished: true });
+  assert.equal(requests.length, 0);
+});
+
+// 上报失败不能抛出：播放器收到错误会以为播放出了问题。
+test('reporting failures are swallowed', async () => {
+  const { lib } = setup(
+    () => { throw new Error('detail unavailable'); },
+    signed,
+    { fetch: async () => { throw new Error('network down'); } },
+  );
+  await lib.played({ id: 'song1' });
+  await lib.stopped({ id: 'song1', heard: 30000, duration: 200000, finished: true });
+});
